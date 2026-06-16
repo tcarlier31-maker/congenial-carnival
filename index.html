@@ -224,19 +224,29 @@ main { max-width:900px; margin:0 auto; padding:20px 16px; padding-bottom:calc(20
 const ODDS_API_BASE = "https://api.the-odds-api.com/v4";
 const ODDS_API_KEY  = "ce3fa2bb4f211a7563fc30fa72546095";
 
-const SPORTS = [
+const FALLBACK_SPORTS = [
   'soccer_france_ligue_one','soccer_epl','soccer_spain_la_liga',
   'soccer_germany_bundesliga','soccer_italy_serie_a',
   'soccer_uefa_champs_league','soccer_uefa_europa_league',
   'basketball_nba','basketball_euroleague'
 ];
+
 const LEAGUE_LABELS = {
   'soccer_france_ligue_one':'Ligue 1','soccer_epl':'Premier League',
   'soccer_spain_la_liga':'La Liga','soccer_germany_bundesliga':'Bundesliga',
   'soccer_italy_serie_a':'Série A','soccer_uefa_champs_league':'Champions League',
   'soccer_uefa_europa_league':'Europa League','basketball_nba':'NBA',
-  'basketball_euroleague':'EuroLeague'
+  'basketball_euroleague':'EuroLeague','soccer_fifa_world_cup':'Coupe du Monde',
+  'soccer_uefa_european_championship':'Euro','soccer_uefa_nations_league':'Ligue des Nations',
+  'soccer_conmebol_copa_america':'Copa America','soccer_usa_mls':'MLS',
+  'soccer_brazil_campeonato':'Brasileirão','baseball_mlb':'MLB',
+  'tennis_atp_wimbledon':'Wimbledon ATP','tennis_wta_wimbledon':'Wimbledon WTA',
+  'tennis_atp_french_open':'ATP','tennis_wta_french_open':'WTA',
+  'mma_mixed_martial_arts':'MMA','cricket_international_t20':'Cricket T20'
 };
+
+// On garde ces familles de sports (le reste = courses, politique… ignoré)
+const KEEP_PREFIXES = ['soccer','basketball','tennis','baseball','mma','cricket'];
 
 let allGames=[], currentFilter='all', selectedDate=null;
 
@@ -287,26 +297,58 @@ async function startLoad(){
   document.getElementById('loadingBox').style.display='block';
   document.getElementById('resultsArea').style.display='none';
   document.getElementById('dateNavWrap').style.display='none';
-  setMsg('Connexion aux sources de cotes…','Initialisation');
+  setMsg('Connexion aux sources de cotes…','Recherche des sports actifs');
 
   const now=new Date();
   const from=new Date(now); from.setDate(from.getDate()-1); from.setHours(0,0,0,0);
   const to=new Date(now); to.setDate(to.getDate()+4); to.setHours(23,59,59,0);
 
-  let games=[];
-  for(let i=0;i<SPORTS.length;i++){
-    const sp=SPORTS[i];
-    setMsg(`Chargement ${LEAGUE_LABELS[sp]||sp}…`,`${i+1}/${SPORTS.length} ligues`);
+  // 1) Récupérer la liste des sports ACTIFS (s'adapte à la saison)
+  let sportsToQuery = FALLBACK_SPORTS;
+  try {
+    const res = await fetchT(`${ODDS_API_BASE}/sports/?apiKey=${ODDS_API_KEY}`);
+    if(res.ok){
+      const list = await res.json();
+      if(Array.isArray(list)){
+        const active = list
+          .filter(s => s.active && KEEP_PREFIXES.some(p => s.key.startsWith(p)))
+          .map(s => { if(s.title && !LEAGUE_LABELS[s.key]) LEAGUE_LABELS[s.key]=s.title; return s.key; });
+        if(active.length) sportsToQuery = active;
+      }
+    } else if(res.status===401){
+      showErr("Clé API refusée (401). La clé n'est plus valide. Créez-en une nouvelle gratuitement sur the-odds-api.com et remplacez-la dans le fichier.");
+      document.getElementById('loadingBox').style.display='none';
+      return;
+    }
+  } catch(e){ console.warn('liste sports:',e.message); }
+
+  // 2) Récupérer les cotes pour chaque sport actif
+  let games=[], httpErrors=0, quotaHit=false;
+  for(let i=0;i<sportsToQuery.length;i++){
+    const sp=sportsToQuery[i];
+    setMsg(`Chargement ${LEAGUE_LABELS[sp]||sp}…`,`${i+1}/${sportsToQuery.length} compétitions`);
     try{
       const url=`${ODDS_API_BASE}/sports/${sp}/odds/?apiKey=${ODDS_API_KEY}&regions=eu&markets=h2h&oddsFormat=decimal&dateFormat=iso&commenceTimeFrom=${from.toISOString()}&commenceTimeTo=${to.toISOString()}`;
       const res=await fetchT(url);
-      if(res.ok){ const d=await res.json(); if(Array.isArray(d)) games=games.concat(d.map(g=>({...g,_sk:sp}))); }
-      else console.warn(sp,'HTTP',res.status);
+      if(res.ok){
+        const d=await res.json();
+        if(Array.isArray(d)) games=games.concat(d.map(g=>({...g,_sk:sp})));
+      } else {
+        httpErrors++;
+        if(res.status===429) quotaHit=true;
+        console.warn(sp,'HTTP',res.status);
+      }
     }catch(e){ console.warn(sp,e.message); }
   }
 
   if(!games.length){
-    showErr('Impossible de récupérer les matchs. Vérifiez votre connexion internet.\n\nSi le problème persiste, votre quota mensuel est peut-être atteint (500 req/mois sur le plan gratuit de The Odds API).');
+    if(quotaHit){
+      showErr("Quota API atteint (429). Le plan gratuit est limité à 500 requêtes/mois. Réessayez le mois prochain ou créez une nouvelle clé.");
+    } else if(httpErrors>0){
+      showErr("L'API a refusé les requêtes. Vérifiez que votre clé est toujours valide sur the-odds-api.com.");
+    } else {
+      showErr("Aucun match programmé en ce moment dans les compétitions suivies (foot, basket, tennis, baseball…). C'est probablement l'intersaison pour les grandes ligues. Réessayez quand des compétitions sont en cours, ou pendant une grande compétition d'été.");
+    }
     document.getElementById('loadingBox').style.display='none';
     return;
   }
